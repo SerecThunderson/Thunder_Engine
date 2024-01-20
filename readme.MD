@@ -6,15 +6,17 @@ Needs a lot of work.
 • Go to the link below and run the program
 https://www.lexaloffle.com/picotron.php?page=playground
 
-• Open "main.lua" and paste it into the blank window
+• Hit ESC and type "cd ram" enter, "cd cart" enter, then "mkdir lib" enter. Hit escape again.
 
-• Click the little + next to main to create a new file
+• Copy github "main.lua" to Picotron main window
 
-• name it render.lua, open the matching file and copy it's contents to paste in the newly created render.lua
+• in Picotron click the little + next to main to create a new file
+
+• name it render.lua and save it in the newly created lib folder, open the matching file and copy it's contents to paste in the newly created render.lua
 
 • repeat for all files except model.obj
 
-• create new file "model.lua"
+• create new file "model.lua" in the ram/cart/gfx folder
 
 • paste model.obj data, then file -> save as -> model.obj
 
