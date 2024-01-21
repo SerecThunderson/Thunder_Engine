@@ -4,16 +4,17 @@
 -- determining visibility of faces, sorting faces for correct rendering order, and the main rendering logic.
 
 -----------------------------------------------------------------------------------------------------------------
+local fovRadians = 90 * math.pi / 180
+local perspectiveDivide = 1 / math.tan(fovRadians / 2)
+local aspectRatio = 480 / 270
+
 -- main function to render a given model to a given camera
 -- need to optimize each step and cull redundancy
 -- @param camera: The camera object used for the projection.
 -- @param model: The 3D model whose vertices are to be transformed.
 function renderModel(camera, model)
-    local transformedVertices = batchTransformModelVertices(model)
-    local fovRadians = lib.smath.degreesToRadians(camera.fov) --hardcode/precalc this
-    local perspectiveDivide = 1 / math.tan(fovRadians / 2) --hardcode/precalc this -- better yet remove the need to pass it to batchRF
-    local aspectRatio = camera.width / camera.height -- see above
-    batchRenderFaces(camera, model, transformedVertices, perspectiveDivide, aspectRatio)
+    local transformedVertices, sortedFaces = batchTransformModelVertices(model, camera)
+    batchRenderFaces(camera, model, transformedVertices, sortedFaces, perspectiveDivide, aspectRatio)
 end
 
 -- Function to create a new camera object.
@@ -40,69 +41,75 @@ function isFaceVisible(camera, face, transformedVertices)
     local v1, v2, v3 = transformedVertices[face[1].v], transformedVertices[face[2].v], transformedVertices[face[3].v]
     local normal = lib.smath.calculateNormal(v1, v2, v3)
     local viewVector = {x = camera.position.x - v1.x, y = camera.position.y - v1.y, z = camera.position.z - v1.z}
-    return lib.smath.dotProduct(normal, viewVector) > 0
+    local isVisible = lib.smath.dotProduct(normal, viewVector) > 0
+    return isVisible, normal
 end
 
 -- Transforms all vertices of a model for the current frame.
 -- Applies scaling and rotation transformations to each vertex.
 -- @param model: The 3D model whose vertices are to be transformed.
 -- @return An array of transformed vertices.
-function batchTransformModelVertices(model)
+function batchTransformModelVertices(model, camera)
     local batchTransformedVertices = {}
+    local faceDepths = {} -- Store average depth of each face
+
     for _, vertex in ipairs(model.vertices) do
         local scaledVertex = {
             x = vertex.x * model.scale.x,
             y = vertex.y * model.scale.y,
             z = vertex.z * model.scale.z
         }
-        batchTransformedVertices[#batchTransformedVertices + 1] = lib.smath.rotatePoint(model.rotation, scaledVertex)
+        table.insert(batchTransformedVertices, lib.smath.rotatePoint(model.rotation, scaledVertex))
     end
-    return batchTransformedVertices
+
+    -- Calculate and store face depths
+    for _, face in ipairs(model.faces) do
+        local depth = calculateFaceDepth(face, batchTransformedVertices, camera)
+        table.insert(faceDepths, {face = face, depth = depth})
+    end
+
+    -- Sort faces by depth
+    table.sort(faceDepths, function(a, b) return a.depth > b.depth end)
+
+    return batchTransformedVertices, faceDepths
 end
+
+function calculateFaceDepth(face, vertices, camera)
+    -- Calculate centroid of the face
+    local centroid = {x = 0, y = 0, z = 0}
+    for _, vertexIndex in ipairs(face) do
+        centroid.x = centroid.x + vertices[vertexIndex.v].x
+        centroid.y = centroid.y + vertices[vertexIndex.v].y
+        centroid.z = centroid.z + vertices[vertexIndex.v].z
+    end
+    centroid.x = centroid.x / #face
+    centroid.y = centroid.y / #face
+    centroid.z = centroid.z / #face
+
+    -- Calculate depth as distance from camera to centroid
+    local depth = math.sqrt(
+        (centroid.x - camera.position.x)^2 +
+        (centroid.y - camera.position.y)^2 +
+        (centroid.z - camera.position.z)^2
+    )
+
+    return depth
+end
+
 
 -- Calculate light level for a given face using normal and light direction.
 -- @param face: The face for which light level is calculated.
 -- @param transformedVertices: An array of vertices that have been transformed for the current frame.
 -- @return The light level (brightness) for the face.
-function getLightLevel(face, transformedVertices)
-    local normal = lib.smath.calculateNormal(transformedVertices[face[1].v], transformedVertices[face[2].v], transformedVertices[face[3].v])
-    normal = lib.smath.normalizeVector(normal) -- Normalize the normal vector
+function getLightLevel(face, transformedVertices, normal)
+    normal = lib.smath.normalizeVector(normal)
     local dotProd = lib.smath.dotProduct(normal, lightDirection)
 
-    -- Clamp dot product to range [0, 1]
     dotProd = math.max(0, dotProd)
-
-    -- Discretize into 5 levels (0 to 4)
     local lightLevel = math.floor(dotProd * 5)
     if lightLevel > 4 then lightLevel = 4 end
 
     return lightLevel
-end
-
--- Sorts faces by their average depth relative to the camera.
--- @param facesInfo: An array of face information including face vertices and colors.
--- @param transformedVertices: An array of vertices that have been transformed for the current frame.
--- @param camera: The camera object.
-function sortFacesByDepth(facesInfo, transformedVertices, camera)
-    local function calculateDepthForFace(face)
-        local totalDepth = 0
-        for _, vertexIndex in ipairs(face) do
-            local vertex = transformedVertices[vertexIndex.v]
-            -- Calculate depth as distance from the camera position
-            local depth = math.sqrt(
-                (vertex.x - camera.position.x)^2 +
-                (vertex.y - camera.position.y)^2 +
-                (vertex.z - camera.position.z)^2
-            )
-            totalDepth = totalDepth + depth
-        end
-        return totalDepth / #face
-    end
-
-    -- Sort faces based on their calculated average depth
-    table.sort(facesInfo, function(a, b)
-        return calculateDepthForFace(a.face) > calculateDepthForFace(b.face)
-    end)
 end
 
 -- Projects a vertex from 3D space onto the 2D screen.
@@ -141,23 +148,26 @@ function projectVertex(camera, vertex, perspectiveDivide, aspectRatio)
 end
 
 -- Renders a batch of faces, sorted by their depth relative to the camera.
--- This function first projects vertices, then determines visible faces, sorts them, and finally renders.
+-- This function first projects vertices, then renders visible and valid faces.
 -- @param camera: The camera object.
 -- @param model: The 3D model to render.
 -- @param transformedVertices: An array of vertices that have been transformed for the current frame.
+-- @param sortedFaces: The faces of the model sorted by depth.
 -- @param perspectiveDivide: The perspective divide factor, calculated from camera's field of view.
 -- @param aspectRatio: The aspect ratio of the screen.
-function batchRenderFaces(camera, model, transformedVertices, perspectiveDivide, aspectRatio)
-    local visibleAndValidFaces = {}
-
-    -- Project vertices from 3D to 2D screen space
-    local projectedVertices = {}
-    for i = 1, #transformedVertices do
-        projectedVertices[i] = projectVertex(camera, transformedVertices[i], perspectiveDivide, aspectRatio)
+function batchRenderFaces(camera, model, transformedVertices, sortedFaces, perspectiveDivide, aspectRatio)
+    if not sortedFaces or #sortedFaces == 0 then
+        print("Error: No sorted faces available for rendering.")
+        return
     end
 
-    -- Collect faces that are visible and valid for rendering
-    for _, face in ipairs(model.faces) do
+    local projectedVertices = {}
+    for i, vertex in ipairs(transformedVertices) do
+        projectedVertices[i] = projectVertex(camera, vertex, perspectiveDivide, aspectRatio)
+    end
+
+    for _, faceInfo in ipairs(sortedFaces) do
+        local face = faceInfo.face
         local faceVertices, faceIsValid = {}, true
 
         for _, vertexIndex in ipairs(face) do
@@ -170,18 +180,17 @@ function batchRenderFaces(camera, model, transformedVertices, perspectiveDivide,
             end
         end
 
-        if faceIsValid and isFaceVisible(camera, face, transformedVertices) then
-            local lightLevel = getLightLevel(face, transformedVertices)
-            table.insert(visibleAndValidFaces, {face = face, vertices = faceVertices, color = lightLevel})
+        if faceIsValid then
+            -- Calculate face normal and check visibility
+            local v1, v2, v3 = transformedVertices[face[1].v], transformedVertices[face[2].v], transformedVertices[face[3].v]
+            local normal = lib.smath.calculateNormal(v1, v2, v3)
+            local isVisible = lib.smath.dotProduct(normal, {x = camera.position.x - v1.x, y = camera.position.y - v1.y, z = camera.position.z - v1.z}) > 0
+
+            if isVisible then
+                local lightLevel = getLightLevel(face, transformedVertices, normal)
+                fill_triangle(faceVertices[1], faceVertices[2], faceVertices[3], lightLevel)
+            end
         end
-    end
-
-    -- Sort faces by depth to ensure correct rendering order
-    sortFacesByDepth(visibleAndValidFaces, transformedVertices, camera)
-
-    -- Render faces in sorted order
-    for _, faceInfo in ipairs(visibleAndValidFaces) do
-        fill_triangle(faceInfo.vertices[1], faceInfo.vertices[2], faceInfo.vertices[3], faceInfo.color)
     end
 end
 
@@ -245,3 +254,5 @@ function fill_triangle(v1, v2, v3, color)
     end
 end
 ---------------------------------------------------------------------------------------------------------------------
+--PRECALCULATE EVERYTHING
+-- NORMALS TRANSFORMATIONS PROJECTION
