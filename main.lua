@@ -31,12 +31,12 @@ function _init()
 	--initiate a camera by calling "newCam" function of render module
 	--the arguments are X, Y, Z, qX, qY, qZ, qW
 	--quaternions are weird 
-	cam = lib.render.newCam(0, 0, -.9, 0, 0, 0, 1)
+	cam = lib.render.newCam(0, .25, -.9, 0, 0, 0, 1)
    
 	--load the model -- a better method of model-handling should be derived
 	--think "scene handler" "model handler" "oct trees"
 	--note folder load location
-	model = lib.obj.load("gfx/model.obj")
+	model = lib.obj.load("gfx/model.lua") -- OBJECT FILE SAVED AS LUA JUST TO SAVE ONE STEP IN PICOTRON
    
 	--set a simple green palette run
 	pal({[0]=1,19,3,17,28},1)
@@ -58,7 +58,7 @@ function _draw() cls(16)
 
     -- call "renderModel" of render module with cam and model for args
     -- eventually need scene handler
-    lib.render.renderModel(cam, model)
+    lib.render.render(cam, model)
     
     print_camera_info()
 end
@@ -115,16 +115,7 @@ end
 
 --rotate the model
 function updateModelRotation(model, skip)
-	 --rotates along a quaternion axis allegedly
-    local rot1 = lib.smath.new(-.002/skip, .006/skip, 0, 1)
-    local rot2 = lib.smath.new(0, -.01, .008/skip, 1)
-    
-    --rotates along a euler axis ALLEGEDLY
-    local rot3 = lib.smath.fromAxisAngle({x = 0, y = 0, z = 1}, .2/skip)
-
-	--apply rotations in order to the model and normalize
+    local rot1 = lib.smath.new(0, .01/skip, 0, 1)
     model.rotation = lib.smath.multiply(rot1, model.rotation)
-    model.rotation = lib.smath.multiply(model.rotation, rot2)
-    model.rotation = lib.smath.multiply(model.rotation, rot3)
     model.rotation = lib.smath.normalize(model.rotation)
 end

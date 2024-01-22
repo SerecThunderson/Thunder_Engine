@@ -4,74 +4,97 @@
 -- determining visibility of faces, sorting faces for correct rendering order, and the main rendering logic.
 
 -----------------------------------------------------------------------------------------------------------------
-local fovRadians = 90 * math.pi / 180
-local perspectiveDivide = 1 / math.tan(fovRadians / 2)
-local aspectRatio = 480 / 270
-
--- main function to render a given model to a given camera
--- need to optimize each step and cull redundancy
+-- Combined function to render a given model to a given camera
 -- @param camera: The camera object used for the projection.
 -- @param model: The 3D model whose vertices are to be transformed.
-function renderModel(camera, model)
+function render(camera, model)
     local transformedVertices, sortedFaces = batchTransformModelVertices(model, camera)
-    batchRenderFaces(camera, model, transformedVertices, sortedFaces, perspectiveDivide, aspectRatio)
-end
+    local camRotation = lib.smath.conjugate(camera.rotation) -- Precompute camRotation
 
--- Function to create a new camera object.
--- @param x, y, z: Position coordinates of the camera.
--- @param qx, qy, qz, qw: Quaternion components representing the camera's rotation.
--- @return A camera object with position, rotation, field of view, and screen dimensions.
-function newCam(x, y, z, qx, qy, qz, qw)
-    local cam = {
-        position = {x = x or 0, y = y or 0, z = z or 0},
-        rotation = lib.smath.new(qx, qy, qz, qw),
-        fov = 70,
-        width = 480,
-        height = 270
-    }
-    return cam
-end
+    if not sortedFaces or #sortedFaces == 0 then
+        print("Error: No sorted faces available for rendering.")
+        return
+    end
 
--- Determines if a face of the model is visible to the camera.
--- @param camera: The camera object.
--- @param face: The face of the model to check visibility for.
--- @param transformedVertices: An array of vertices that have been transformed for the current frame.
--- @return True if the face is visible to the camera, false otherwise.
-function isFaceVisible(camera, face, transformedVertices)
-    local v1, v2, v3 = transformedVertices[face[1].v], transformedVertices[face[2].v], transformedVertices[face[3].v]
-    local normal = lib.smath.calculateNormal(v1, v2, v3)
-    local viewVector = {x = camera.position.x - v1.x, y = camera.position.y - v1.y, z = camera.position.z - v1.z}
-    local isVisible = lib.smath.dotProduct(normal, viewVector) > 0
-    return isVisible, normal
+    local projectedVertices = {}
+    for i, vertex in ipairs(transformedVertices) do
+        projectedVertices[i] = projectVertex(camera, vertex, camRotation)
+    end
+
+    for _, faceInfo in ipairs(sortedFaces) do
+        local face = faceInfo.face
+        local isVisible, normal = isFaceVisible(camera, face, transformedVertices)
+
+        if isVisible then
+            local faceVertices = {}
+            for _, vertexIndex in ipairs(face) do
+                local projectedVertex = projectedVertices[vertexIndex.v]
+                if projectedVertex then
+                    table.insert(faceVertices, projectedVertex)
+                else
+                    break
+                end
+            end
+
+            if #faceVertices == #face then
+                local lightLevel = getLightLevel(face, transformedVertices, normal)
+                fill_triangle(faceVertices[1], faceVertices[2], faceVertices[3], lightLevel)
+            end
+        end
+    end
 end
 
 -- Transforms all vertices of a model for the current frame.
--- Applies scaling and rotation transformations to each vertex.
+-- Applies scaling, rotation, and translation transformations to each vertex.
 -- @param model: The 3D model whose vertices are to be transformed.
 -- @return An array of transformed vertices.
 function batchTransformModelVertices(model, camera)
     local batchTransformedVertices = {}
-    local faceDepths = {} -- Store average depth of each face
+    local faceDepths = {} 
 
-    for _, vertex in ipairs(model.vertices) do
-        local scaledVertex = {
-            x = vertex.x * model.scale.x,
-            y = vertex.y * model.scale.y,
-            z = vertex.z * model.scale.z
+    for i, vertex in ipairs(model.vertices) do
+        local scaledX, scaledY, scaledZ = vertex.x * model.scale.x, vertex.y * model.scale.y, vertex.z * model.scale.z
+        local rotatedVertex = lib.smath.rotatePoint(model.rotation, {x = scaledX, y = scaledY, z = scaledZ})
+
+        batchTransformedVertices[i] = {
+            x = rotatedVertex.x + model.position.x,
+            y = rotatedVertex.y + model.position.y,
+            z = rotatedVertex.z + model.position.z
         }
-        table.insert(batchTransformedVertices, lib.smath.rotatePoint(model.rotation, scaledVertex))
     end
 
-    -- Calculate and store face depths
     for _, face in ipairs(model.faces) do
         local depth = calculateFaceDepth(face, batchTransformedVertices, camera)
         table.insert(faceDepths, {face = face, depth = depth})
     end
 
-    -- Sort faces by depth
     table.sort(faceDepths, function(a, b) return a.depth > b.depth end)
 
     return batchTransformedVertices, faceDepths
+end
+
+-- Projects a vertex from 3D space onto the 2D screen.
+-- @param camera: The camera object used for the projection.
+-- @param vertex: The 3D vertex to be projected.
+-- @return The 2D coordinates of the projected vertex, or nil if the vertex is not visible.
+function projectVertex(camera, vertex, camRotation)
+    local tx, ty, tz = vertex.x - camera.position.x, vertex.y - camera.position.y, vertex.z - camera.position.z
+    local transformedVertex = lib.smath.rotatePoint(camRotation, {x = tx, y = ty, z = tz})
+    
+    if transformedVertex.z <= 0 then return nil end
+
+    local pdz = camera.perspectiveDivide / transformedVertex.z
+    local projectedX = transformedVertex.x * pdz
+    local projectedY = transformedVertex.y * pdz
+
+    projectedX = (projectedX / camera.aspectRatio + 1) * camera.halfWidth
+    projectedY = (1 - projectedY) * camera.halfHeight
+
+    if projectedX < 0 or projectedX > camera.width or projectedY < 0 or projectedY > camera.height then
+        return nil
+    end
+
+    return {x = math.floor(projectedX + 0.5), y = math.floor(projectedY + 0.5)}
 end
 
 function calculateFaceDepth(face, vertices, camera)
@@ -96,7 +119,6 @@ function calculateFaceDepth(face, vertices, camera)
     return depth
 end
 
-
 -- Calculate light level for a given face using normal and light direction.
 -- @param face: The face for which light level is calculated.
 -- @param transformedVertices: An array of vertices that have been transformed for the current frame.
@@ -112,124 +134,75 @@ function getLightLevel(face, transformedVertices, normal)
     return lightLevel
 end
 
--- Projects a vertex from 3D space onto the 2D screen.
--- @param camera: The camera object used for the projection.
--- @param vertex: The 3D vertex to be projected.
--- @param perspectiveDivide: The perspective divide factor, calculated from camera's field of view.
--- @param aspectRatio: The aspect ratio of the screen.
--- @return The 2D coordinates of the projected vertex, or nil if the vertex is not visible.
-function projectVertex(camera, vertex, perspectiveDivide, aspectRatio)
-    -- Translate vertex relative to camera position
-    local camPos = camera.position
-    local tx, ty, tz = vertex.x - camPos.x, vertex.y - camPos.y, vertex.z - camPos.z
-
-    -- Rotate vertex according to camera's rotation
-    local camRotation = lib.smath.conjugate(camera.rotation)
-    local transformedVertex = lib.smath.rotatePoint(camRotation, {x = tx, y = ty, z = tz})
-
-    -- Return nil if vertex is behind the camera
-    if transformedVertex.z <= 0 then return nil end
-
-    -- Perspective projection
-    local pdz = perspectiveDivide / transformedVertex.z
-    local projectedX = transformedVertex.x * pdz
-    local projectedY = transformedVertex.y * pdz
-
-    -- Convert to screen coordinates
-    projectedX = (projectedX / aspectRatio + 1) * camera.width / 2
-    projectedY = (1 - projectedY) * camera.height / 2
-
-    -- Return nil if vertex is outside screen bounds
-    if projectedX < 0 or projectedX > camera.width or projectedY < 0 or projectedY > camera.height then
-        return nil
-    end
-
-    return {x = math.floor(projectedX + 0.5), y = math.floor(projectedY + 0.5)}
+-- Determines if a face of the model is visible to the camera.
+-- @param camera: The camera object.
+-- @param face: The face of the model to check visibility for.
+-- @param transformedVertices: An array of vertices that have been transformed for the current frame.
+-- @return True if the face is visible to the camera, false otherwise.
+function isFaceVisible(camera, face, transformedVertices)
+    local v1, v2, v3 = transformedVertices[face[1].v], transformedVertices[face[2].v], transformedVertices[face[3].v]
+    local normal = lib.smath.calculateNormal(v1, v2, v3)
+    local viewVector = {x = camera.position.x - v1.x, y = camera.position.y - v1.y, z = camera.position.z - v1.z}
+    local isVisible = lib.smath.dotProduct(normal, viewVector) > 0
+    return isVisible, normal
 end
 
--- Renders a batch of faces, sorted by their depth relative to the camera.
--- This function first projects vertices, then renders visible and valid faces.
--- @param camera: The camera object.
--- @param model: The 3D model to render.
--- @param transformedVertices: An array of vertices that have been transformed for the current frame.
--- @param sortedFaces: The faces of the model sorted by depth.
--- @param perspectiveDivide: The perspective divide factor, calculated from camera's field of view.
--- @param aspectRatio: The aspect ratio of the screen.
-function batchRenderFaces(camera, model, transformedVertices, sortedFaces, perspectiveDivide, aspectRatio)
-    if not sortedFaces or #sortedFaces == 0 then
-        print("Error: No sorted faces available for rendering.")
-        return
-    end
-
-    local projectedVertices = {}
-    for i, vertex in ipairs(transformedVertices) do
-        projectedVertices[i] = projectVertex(camera, vertex, perspectiveDivide, aspectRatio)
-    end
-
-    for _, faceInfo in ipairs(sortedFaces) do
-        local face = faceInfo.face
-        local faceVertices, faceIsValid = {}, true
-
-        for _, vertexIndex in ipairs(face) do
-            local projectedVertex = projectedVertices[vertexIndex.v]
-            if projectedVertex then
-                table.insert(faceVertices, projectedVertex)
-            else
-                faceIsValid = false
-                break
-            end
-        end
-
-        if faceIsValid then
-            -- Calculate face normal and check visibility
-            local v1, v2, v3 = transformedVertices[face[1].v], transformedVertices[face[2].v], transformedVertices[face[3].v]
-            local normal = lib.smath.calculateNormal(v1, v2, v3)
-            local isVisible = lib.smath.dotProduct(normal, {x = camera.position.x - v1.x, y = camera.position.y - v1.y, z = camera.position.z - v1.z}) > 0
-
-            if isVisible then
-                local lightLevel = getLightLevel(face, transformedVertices, normal)
-                fill_triangle(faceVertices[1], faceVertices[2], faceVertices[3], lightLevel)
-            end
-        end
-    end
+-- Function to create a new camera object.
+-- @param x, y, z: Position coordinates of the camera.
+-- @param qx, qy, qz, qw: Quaternion components representing the camera's rotation.
+-- @return A camera object with position, rotation, field of view, and screen dimensions.
+function newCam(x, y, z, qx, qy, qz, qw)
+    local width = 480
+    local height = 270
+    local fovRadians = 70 * math.pi / 180 -- 70 degrees field of view
+    local cam = {
+        position = {x = x or 0, y = y or 0, z = z or 0},
+        rotation = lib.smath.new(qx, qy, qz, qw),
+        fovRadians = fovRadians,
+        perspectiveDivide = 1 / math.tan(fovRadians / 2),
+        aspectRatio = width / height,
+        width = width,
+        height = height,
+        halfWidth = width / 2,
+        halfHeight = height / 2
+    }
+    return cam
 end
 
 -- Fill triangle function, fills a triangle on the screen given its vertices and color.
 -- It splits a general triangle into two special cases: top-flat and bottom-flat triangles, then fills them.
 -- @param v1, v2, v3: The three vertices of the triangle in screen space.
--- @param color: The color to fill the triangle with.
+-- @param color: The base color to fill the triangle with.* for use with shaded color runs
+-- @DEV - consider combined use of runs + fill for optimized palette and shading
 function fill_triangle(v1, v2, v3, color)
 
-	-- local helper function to fill a triangle with a flat bottom
-	local function fill_bottom_flat_triangle(v1, v2, v3, color)
-	    local invslope1 = (v2.x - v1.x) / (v2.y - v1.y)
-	    local invslope2 = (v3.x - v1.x) / (v3.y - v1.y)
-	
-	    local curx1 = v1.x
-	    local curx2 = v1.x
-	
-	    for scanlineY = v1.y, v2.y do
-	        rectfill(math.floor(curx1), scanlineY, math.floor(curx2), scanlineY, color)
-	        curx1 = curx1 + invslope1
-	        curx2 = curx2 + invslope2
-	    end
-	end
-	
-	-- local helper function to fill a triangle with a flat top
-	local function fill_top_flat_triangle(v1, v2, v3, color)
-	    local invslope1 = (v3.x - v1.x) / (v3.y - v1.y)
-	    local invslope2 = (v3.x - v2.x) / (v3.y - v2.y)
-	
-	    local curx1 = v3.x
-	    local curx2 = v3.x
-	
-	    for scanlineY = v3.y, v1.y, -1 do
-	        rectfill(math.floor(curx1), scanlineY, math.floor(curx2), scanlineY, color)
-	        curx1 = curx1 - invslope1
-	        curx2 = curx2 - invslope2
-	    end
-	end
+    local function fill_bottom_flat_triangle(v1, v2, v3)
+        local invslope1 = (v2.x - v1.x) / (v2.y - v1.y)
+        local invslope2 = (v3.x - v1.x) / (v3.y - v1.y)
 
+        local curx1 = v1.x
+        local curx2 = v1.x
+
+        for scanlineY = v1.y, v2.y do
+            rectfill(curx1 \ 1, scanlineY, curx2 \ 1, scanlineY, color\1) -- thank you Werxy
+            curx1 = curx1 + invslope1
+            curx2 = curx2 + invslope2
+        end
+    end
+
+    local function fill_top_flat_triangle(v1, v2, v3)
+        local invslope1 = (v3.x - v1.x) / (v3.y - v1.y)
+        local invslope2 = (v3.x - v2.x) / (v3.y - v2.y)
+
+        local curx1 = v3.x
+        local curx2 = v3.x
+
+        for scanlineY = v3.y, v1.y, -1 do
+            rectfill(curx1 \ 1, scanlineY, curx2 \ 1, scanlineY, color \ 1) -- thank you Werxy
+            curx1 = curx1 - invslope1
+            curx2 = curx2 - invslope2
+        end
+    end
 	-- local helper function to sort vertices by y-coordinate
 	local function sort_vertices(v1, v2, v3)
 	    if v2.y < v1.y then v1, v2 = v2, v1 end
@@ -254,5 +227,4 @@ function fill_triangle(v1, v2, v3, color)
     end
 end
 ---------------------------------------------------------------------------------------------------------------------
---PRECALCULATE EVERYTHING
--- NORMALS TRANSFORMATIONS PROJECTION
+
